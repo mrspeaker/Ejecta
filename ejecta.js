@@ -30,6 +30,8 @@ window.navigator = {
 
 // Create the default screen canvas
 window.canvas = new Ejecta.Canvas();
+window.canvas.type = 'canvas';
+window.canvas.style = {};
 
 // The console object
 window.console = {
@@ -100,7 +102,10 @@ window.document = {
 	
 	createElement: function( name ) {
 		if( name === 'canvas' ) {
-			return new Ejecta.Canvas();
+			var canvas = new Ejecta.Canvas();
+			canvas.type = 'canvas';
+			canvas.style = {};
+			return canvas;
 		}
 		else if( name == 'audio' ) {
 			return new Ejecta.Audio();
@@ -183,7 +188,7 @@ window.canvas.removeEventListener = window.removeEventListener = function( type,
 var touchInput = null;
 var touchEvent = {
 	type: 'touchstart', 
-	target: {type:'canvas'}, 
+	target: canvas,
 	touches: [],
 	preventDefault: function(){},
 	stopPropagation: function(){}
@@ -227,7 +232,7 @@ window.document._eventInitializers.touchstart =
 var accelerometer = null;
 var deviceMotionEvent = {
 	type: 'devicemotion', 
-	target: {type:'canvas'},
+	target: canvas,
 	acceleration: {x: 0, y: 0, z: 0},
 	accelerationIncludingGravity: {x: 0, y: 0, z: 0},
 	preventDefault: function(){},
