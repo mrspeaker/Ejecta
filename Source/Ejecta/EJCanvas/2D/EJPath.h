@@ -1,20 +1,21 @@
 #import <UIKit/UIKit.h>
-#import "EJCanvasTypes.h"
+#import "EJCanvas2DTypes.h"
 
 #define EJ_PATH_RECURSION_LIMIT 8
 #define EJ_PATH_DISTANCE_EPSILON 1.0f
 #define EJ_PATH_COLLINEARITY_EPSILON FLT_EPSILON
-#define EJ_PATH_STEPS_FOR_CIRCLE 48.0f
+#define EJ_PATH_MIN_STEPS_FOR_CIRCLE 20.0f
+#define EJ_PATH_MAX_STEPS_FOR_CIRCLE 64.0f
 
 typedef enum {
 	kEJPathPolygonTargetColor,
 	kEJPathPolygonTargetDepth
 } EJPathPolygonTarget;
 
-@class EJCanvasContext;
+@class EJCanvasContext2D;
 
-@interface EJPath : NSObject {
-	EJVector2 currentPos, startPos, lastPushed;
+@interface EJPath : NSObject <NSCopying> {
+	EJVector2 currentPos, lastPushed;
 	EJVector2 minPos, maxPos;
 	int longestSubpath;
 	
@@ -40,7 +41,7 @@ typedef enum {
 - (void)arcToX1:(float)x1 y1:(float)y1 x2:(float)x2 y2:(float)y2 radius:(float)radius;
 - (void)arcX:(float)x y:(float)y radius:(float)radius startAngle:(float)startAngle endAngle:(float)endAngle	antiClockwise:(BOOL)antiClockwise;
 
-- (void)drawPolygonsToContext:(EJCanvasContext *)context target:(EJPathPolygonTarget)target;
-- (void)drawLinesToContext:(EJCanvasContext *)context;
+- (void)drawPolygonsToContext:(EJCanvasContext2D *)context target:(EJPathPolygonTarget)target;
+- (void)drawLinesToContext:(EJCanvasContext2D *)context;
 
 @end

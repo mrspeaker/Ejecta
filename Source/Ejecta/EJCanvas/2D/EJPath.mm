@@ -1,5 +1,5 @@
 #import "EJPath.h"
-#import "EJCanvasContext.h"
+#import "EJCanvasContext2D.h"
 
 #include <vector>
 
@@ -26,7 +26,7 @@ typedef std::vector<subpath_t> path_t;
 - (id)init {
 	self = [super init];
 	if(self) {
-		transform	= CGAffineTransformIdentity;
+		transform = CGAffineTransformIdentity;
 		stencilMask = 0x1;
 		[self reset];
 	}
@@ -36,7 +36,6 @@ typedef std::vector<subpath_t> path_t;
 - (id)copyWithZone:(NSZone *)zone {
 	EJPath * copy = [[EJPath allocWithZone:zone] init];
 	copy->currentPos = currentPos;
-	copy->startPos = startPos;
 	copy->minPos = minPos;
 	copy->maxPos = maxPos;
 	copy->longestSubpath = longestSubpath;
@@ -49,7 +48,7 @@ typedef std::vector<subpath_t> path_t;
 
 - (void)push:(EJVector2)v {
 	// Ignore this point if it's identical to the last
-	if( v.x == lastPushed.x && v.y == lastPushed.y && currentPath.points.size() > 0 ) {
+	if( v.x == lastPushed.x && v.y == lastPushed.y && !currentPath.points.empty() ) {
 		return;
 	}
 	lastPushed = v;
@@ -68,7 +67,6 @@ typedef std::vector<subpath_t> path_t;
 	currentPath.points.clear();
 	
 	currentPos = EJVector2Make( 0, 0 );
-	startPos = EJVector2Make( 0, 0 );
 	
 	minPos = EJVector2Make(INFINITY, INFINITY);
 	maxPos = EJVector2Make(-INFINITY, -INFINITY);
@@ -76,8 +74,8 @@ typedef std::vector<subpath_t> path_t;
 
 - (void)close {
 	currentPath.isClosed = true;
-	[self push:startPos];
-	currentPos = startPos;
+	currentPos = currentPath.points.front();
+	[self push:currentPos];
 	[self endSubPath];
 }
 
@@ -88,12 +86,11 @@ typedef std::vector<subpath_t> path_t;
 	}
 	currentPath.points.clear();
 	currentPath.isClosed = false;
-	startPos = currentPos;
 }
 
 - (void)moveToX:(float)x y:(float)y {
 	[self endSubPath];
-	currentPos = startPos = EJVector2ApplyTransform( EJVector2Make( x, y ), transform);
+	currentPos = EJVector2ApplyTransform( EJVector2Make( x, y ), transform);
 	[self push:currentPos];
 }
 
@@ -301,21 +298,27 @@ typedef std::vector<subpath_t> path_t;
         ? (startAngle - endAngle) *-1
         : (endAngle - startAngle);
 	
-	int steps = ceil(fabsf(span) * (EJ_PATH_STEPS_FOR_CIRCLE / (2 * M_PI)) );
-	float stepSize = span / (float)steps;
+	// Calculate the number of steps, based on the radius, scaling and the span
+	float size = radius * CGAffineTransformGetScale(transform) * 5;
+	float maxSteps = EJ_PATH_MAX_STEPS_FOR_CIRCLE * fabsf(span)/(2 * M_PI);
+	int steps = MAX(EJ_PATH_MIN_STEPS_FOR_CIRCLE, (size / (200+size)) * maxSteps);
 	
+	float stepSize = span / (float)steps;
 	float angle = startAngle;
-	for( int i = 0; i <= steps; i++, angle += stepSize ) {
-		currentPos = EJVector2ApplyTransform( EJVector2Make( x + cosf(angle) * radius, y + sinf(angle) * radius ), transform);
+	for( int i = 0; i < steps; i++, angle += stepSize ) {
+		currentPos = EJVector2ApplyTransform( EJVector2Make(x + cosf(angle) * radius, y + sinf(angle) * radius), transform);
 		[self push:currentPos];
 	}
+	
+	// Add the final step or close to the first one if it's a full circle
+	float lastAngle = (fabsf(span) < 2 * M_PI - FLT_EPSILON) ? angle : startAngle;
+	currentPos = EJVector2ApplyTransform( EJVector2Make(x + cosf(lastAngle) * radius, y + sinf(lastAngle) * radius), transform);
+	[self push:currentPos];
 }
 
-- (void)drawPolygonsToContext:(EJCanvasContext *)context target:(EJPathPolygonTarget)target {
+- (void)drawPolygonsToContext:(EJCanvasContext2D *)context target:(EJPathPolygonTarget)target {
 	[self endSubPath];
 	if( longestSubpath < 3 ) { return; }
-	
-	[context setTexture:NULL];
 	
 	EJCanvasState * state = context.state;
 	EJColorRGBA color = state->fillColor;
@@ -332,8 +335,8 @@ typedef std::vector<subpath_t> path_t;
 	
 	
 	// Disable drawing to the color buffer, enable the stencil buffer
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableVertexAttribArray(kEJGLProgram2DAttributeUV);
+	glDisableVertexAttribArray(kEJGLProgram2DAttributeColor);
 	
 	glDisable(GL_BLEND);
 	glEnable(GL_STENCIL_TEST);
@@ -348,7 +351,6 @@ typedef std::vector<subpath_t> path_t;
 	glStencilOp(GL_ZERO, GL_ZERO, GL_ZERO);
 	[context
 		pushRectX:minPos.x y:minPos.y w:maxPos.x-minPos.x h:maxPos.y-minPos.y
-		tx:0 ty:0 tw:0 th:0
 		color:color	withTransform:CGAffineTransformIdentity];
 	[context flushBuffers];
 	
@@ -359,7 +361,7 @@ typedef std::vector<subpath_t> path_t;
 	
 	glEnable(GL_CULL_FACE);
 	for( path_t::iterator sp = paths.begin(); sp != paths.end(); ++sp ) {
-		glVertexPointer(2, GL_FLOAT, sizeof(EJVector2), &(sp->points).front());
+		glVertexAttribPointer(kEJGLProgram2DAttributePos, 2, GL_FLOAT, GL_FALSE, 0, &(sp->points).front());
 		
 		glCullFace(GL_BACK);
 		glStencilOp(GL_INCR_WRAP, GL_KEEP, GL_INCR_WRAP);
@@ -389,10 +391,32 @@ typedef std::vector<subpath_t> path_t;
 	
 	glStencilFunc(GL_NOTEQUAL, 0x00, 0xff);
     glStencilOp(GL_ZERO, GL_ZERO, GL_ZERO);
-	[context
-		pushRectX:minPos.x y:minPos.y w:maxPos.x-minPos.x h:maxPos.y-minPos.y
-		tx:0 ty:0 tw:0 th:0
-		color:color	withTransform:CGAffineTransformIdentity];
+
+	if( state->fillObject && target == kEJPathPolygonTargetColor ) {
+		// If we have a fill pattern or gradient, we have to do some extra work to unproject the
+		// Quad we're drawing, so we can then project it _with_ the pattern/gradient again
+		
+		CGAffineTransform inverse = CGAffineTransformInvert(transform);
+		EJVector2 p1 = EJVector2ApplyTransform(minPos, inverse);
+		EJVector2 p2 = EJVector2ApplyTransform(EJVector2Make(maxPos.x, minPos.y), inverse);
+		EJVector2 p3 = EJVector2ApplyTransform(EJVector2Make(minPos.x, maxPos.y), inverse);
+		EJVector2 p4 = EJVector2ApplyTransform(maxPos, inverse);
+		
+		// Find the unprojected min/max
+		EJVector2 tmin = { MIN(p1.x, MIN(p2.x,MIN(p3.x, p4.x))), MIN(p1.y, MIN(p2.y,MIN(p3.y, p4.y))) };
+		EJVector2 tmax = { MAX(p1.x, MAX(p2.x,MAX(p3.x, p4.x))), MAX(p1.y, MAX(p2.y,MAX(p3.y, p4.y))) };
+		
+		color = (EJColorRGBA){.rgba = {255, 255, 255, 255 * state->globalAlpha}};
+		[context
+			pushFilledRectX:tmin.x y:tmin.y w:tmax.x-tmin.x h:tmax.y-tmin.y
+			fillable:state->fillObject color:color withTransform:transform];
+	}
+	else {
+		[context
+			pushRectX:minPos.x y:minPos.y w:maxPos.x-minPos.x h:maxPos.y-minPos.y
+			color:color	withTransform:CGAffineTransformIdentity];
+	}
+	
 	[context flushBuffers];
 	glDisable(GL_STENCIL_TEST);
 	
@@ -405,7 +429,7 @@ typedef std::vector<subpath_t> path_t;
 	}
 }
 
-- (void)drawArcToContext:(EJCanvasContext *)context atPoint:(EJVector2)point v1:(EJVector2)p1 v2:(EJVector2)p2 color:(EJColorRGBA)color {
+- (void)drawArcToContext:(EJCanvasContext2D *)context atPoint:(EJVector2)point v1:(EJVector2)p1 v2:(EJVector2)p2 color:(EJColorRGBA)color {
 
 	EJCanvasState * state = context.state;
 	float width2 = state->lineWidth/2;
@@ -428,14 +452,18 @@ typedef std::vector<subpath_t> path_t;
 	}
 	
 	// 1 step per 5 pixel
-	float pxScale = CGAffineTransformGetScale(state->transform) * context.backingStoreRatio;
-	int numSteps = MAX( 1, (angle2 * width2 * pxScale) / 5.0f );
+	float pxScale = CGAffineTransformGetScale(state->transform);
+	int numSteps = ceilf( (angle2 * width2 * pxScale) / 5.0f );
 	
-	if(numSteps==1) {
+	if( numSteps == 1 ) {
 		[context
 			pushTriX1:p1.x	y1:p1.y x2:point.x y2:point.y x3:p2.x y3:p2.y
 			color:color withTransform:transform];
 		return;
+	}
+	// avoid "triangular" look
+	else if( numSteps == 3 && fabsf(angle2) > M_PI_2 ) {
+		numSteps = 4;
 	}
 	
 	// calculate direction
@@ -462,15 +490,13 @@ typedef std::vector<subpath_t> path_t;
 	}
 }
 
-- (void)drawLinesToContext:(EJCanvasContext *)context {
+- (void)drawLinesToContext:(EJCanvasContext2D *)context {
 	[self endSubPath];
 	
 	EJCanvasState * state = context.state;
-	EJVector2 vecZero = { 0.0f, 0.0f };
 	
 	// Find the width of the line as it is projected onto the screen.
 	float projectedLineWidth = CGAffineTransformGetScale( state->transform ) * state->lineWidth;
-	[context setTexture:NULL];
 	
 	// Figure out if we need to add line caps and set the cap texture coord for square or round caps.
 	// For thin lines we disable texturing and line caps.
@@ -486,7 +512,8 @@ typedef std::vector<subpath_t> path_t;
 	
 	// Enable stencil test when drawing transparent lines.
 	// Cycle through all bits, so that the stencil buffer only has to be cleared after eight stroke operations
-	if( color.rgba.a < 0xff ) {
+	BOOL useStencil = (color.rgba.a < 0xff || state->globalCompositeOperation != kEJCompositeOperationSourceOver);
+	if( useStencil ) {
 		[context flushBuffers];
 		[context createStencilBufferOnce];
 		
@@ -501,9 +528,7 @@ typedef std::vector<subpath_t> path_t;
 	// To draw the line correctly with transformations, we need to construct the line
 	// vertices from the untransformed points and only apply the transformation in
 	// the last step (pushQuad) again.	
-	CGAffineTransform inverseTransform = CGAffineTransformIsIdentity(transform)
-		? transform
-		: CGAffineTransformInvert(transform);
+	CGAffineTransform inverseTransform = CGAffineTransformInvert(transform);
 	
 	
 	// Oh god, I'm so sorry... This code sucks quite a bit. I'd be surprised if I
@@ -565,7 +590,6 @@ typedef std::vector<subpath_t> path_t;
 						
 						[context
 							 pushQuadV1:cap11 v2:cap12 v3:miter21 v4:miter22
-							 t1:vecZero t2:vecZero t3:vecZero t4:vecZero
 							 color:color withTransform:transform];
 					}
 					else {
@@ -651,7 +675,6 @@ typedef std::vector<subpath_t> path_t;
 
 			[context
 				pushQuadV1:miter11 v2:miter12 v3:miter21 v4:miter22
-				t1:vecZero t2:vecZero t3:vecZero t4:vecZero
 				color:color withTransform:transform];
 
 			// No miter added? The "miter" for the next segment needs to be the butt for the next segment,
@@ -705,7 +728,6 @@ typedef std::vector<subpath_t> path_t;
 
 		[context
 			pushQuadV1:miter11 v2:miter12 v3:miter21 v4:miter22
-			t1:vecZero t2:vecZero t3:vecZero t4:vecZero
 			color:color withTransform:transform];		
 
 		// End cap
@@ -717,7 +739,6 @@ typedef std::vector<subpath_t> path_t;
 				
 				[context
 					pushQuadV1:cap11 v2:cap12 v3:miter11 v4:miter12
-					t1:vecZero t2:vecZero t3:vecZero t4:vecZero
 					color:color withTransform:transform];
 			}
 			else {
@@ -727,7 +748,7 @@ typedef std::vector<subpath_t> path_t;
 	} // for each path
 	
 	// disable stencil test when drawing transparent lines
-	if( color.rgba.a < 0xff ) {
+	if( useStencil ) {
 		[context flushBuffers];
 		glDisable(GL_STENCIL_TEST);
 		

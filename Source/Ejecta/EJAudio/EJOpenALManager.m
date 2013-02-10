@@ -1,23 +1,13 @@
 #import "EJOpenALManager.h"
 
-
 @implementation EJOpenALManager
-
 @synthesize buffers;
-
-
-static EJOpenALManager * openALManagerInstance = NULL;
-
-+ (EJOpenALManager *)instance {
-	if( openALManagerInstance == NULL ) {
-		openALManagerInstance = [[self alloc] init];
-	}
-	return openALManagerInstance;
-}
 
 -(id)init {
 	if( self = [super init] ) {
-		buffers = [[NSMutableDictionary alloc] init];
+		// Create a non-retaining Dictionary to hold the cached buffers
+		buffers = (NSMutableDictionary*)CFDictionaryCreateMutable(NULL, 8, &kCFCopyStringDictionaryKeyCallBacks, NULL);
+		
 		device = alcOpenDevice(NULL);
 		if( device ) {
 			context = alcCreateContext( device, NULL );
@@ -28,6 +18,8 @@ static EJOpenALManager * openALManagerInstance = NULL;
 }
 
 - (void)dealloc {
+	[buffers release];
+	
 	alcDestroyContext( context );
 	alcCloseDevice( device );
 	[super dealloc];

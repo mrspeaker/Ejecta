@@ -7,9 +7,10 @@
 @synthesize path;
 @synthesize preload;
 
-- (id)initWithContext:(JSContextRef)ctx object:(JSObjectRef)obj argc:(size_t)argc argv:(const JSValueRef [])argv {
-	if( self = [super initWithContext:ctx object:obj argc:argc argv:argv] ) {
+- (id)initWithContext:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv {
+	if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
 		volume = 1;
+		paused = true;
 		preload = kEJAudioPreloadNone;
 		
 		if( argc > 0 ) {
@@ -32,7 +33,7 @@
 		source = NULL;
 		
 		path = [pathp retain];
-		if( preload == kEJAudioPreloadAuto ) {
+		if( preload != kEJAudioPreloadNone ) {
 			[self load];
 		}
 	}
@@ -44,10 +45,14 @@
 	// This will begin loading the sound in a background thread
 	loading = YES;
 	
+	// Protect this Audio object from garbage collection, as its callback function
+	// may be the only thing holding on to it
+	JSValueProtect([EJApp instance].jsGlobalContext, jsObject);
+	
 	NSString * fullPath = [[EJApp instance] pathForResource:path];
-	NSInvocationOperation* loadOp = [[NSInvocationOperation alloc] initWithTarget:self
+	NSInvocationOperation * loadOp = [[NSInvocationOperation alloc] initWithTarget:self
 				selector:@selector(loadOperation:) object:fullPath];
-	[loadOp setThreadPriority:0.0];
+	loadOp.threadPriority = 0.2;
 	[[EJApp instance].opQueue addOperation:loadOp];
 	[loadOp release];
 }
@@ -65,8 +70,8 @@
 		else {
 			NSLog(@"Loading Sound(AVAudio): %@", path);
 			src = [[EJAudioSourceAVAudio alloc] initWithPath:fullPath];
-			((EJAudioSourceAVAudio *)src).delegate = self;
 		}
+		src.delegate = self;
 		[src autorelease];
 		
 		[self performSelectorOnMainThread:@selector(endLoad:) withObject:src waitUntilDone:NO];
@@ -81,19 +86,22 @@
 	if( playAfterLoad ) {
 		[source play];
 	}
-	loading = NO;
 	
+	loading = NO;
 	[self triggerEvent:@"canplaythrough" argc:0 argv:NULL];
+	[self triggerEvent:@"loadedmetadata" argc:0 argv:NULL];
+	
+	JSValueUnprotect([EJApp instance].jsGlobalContext, jsObject);
 }
 
-- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
+- (void)sourceDidFinishPlaying:(NSObject<EJAudioSource> *)source {
 	ended = true;
 	[self triggerEvent:@"ended" argc:0 argv:NULL];
 }
 
 - (void)setPreload:(EJAudioPreload)preloadp {
 	preload = preloadp;
-	if( preload == kEJAudioPreloadAuto ) {
+	if( preload != kEJAudioPreloadNone ) {
 		[self load];
 	}
 }
@@ -106,6 +114,7 @@ EJ_BIND_FUNCTION(play, ctx, argc, argv) {
 	}
 	else {
 		[source play];
+		paused = false;
 		ended = false;
 	}
 	return NULL;
@@ -116,6 +125,7 @@ EJ_BIND_FUNCTION(pause, ctx, argc, argv) {
 		playAfterLoad = NO;
 	}
 	else {
+		paused = true;
 		[source pause];
 	}
 	return NULL;
@@ -141,12 +151,8 @@ EJ_BIND_FUNCTION(canPlayType, ctx, argc, argv) {
 }
 
 EJ_BIND_FUNCTION(cloneNode, ctx, argc, argv) {
-	// Create new JS object
-	JSClassRef audioClass = [[EJApp instance] getJSClassForClass:[EJBindingAudio class]];
-	JSObjectRef obj = JSObjectMake( ctx, audioClass, NULL );
-	
-	// Create the native instance
-	EJBindingAudio * audio = [[EJBindingAudio alloc] initWithContext:ctx object:obj argc:0 argv:NULL];
+	EJBindingAudio * audio = [[EJBindingAudio alloc] initWithContext:ctx argc:0 argv:NULL];
+	JSObjectRef clone = [EJBindingAudio createJSObjectWithContext:ctx instance:audio];
 	
 	audio.loop = loop;
 	audio.volume = volume;
@@ -159,9 +165,11 @@ EJ_BIND_FUNCTION(cloneNode, ctx, argc, argv) {
 		[audio load];
 	}
 	
-	// Attach the native instance to the js object
-	JSObjectSetPrivate( obj, (void *)audio );
-	return obj;
+	return clone;
+}
+
+EJ_BIND_GET(duration, ctx) {
+	return JSValueMakeNumber(ctx, source.duration);
 }
 
 EJ_BIND_GET(loop, ctx) {
@@ -183,12 +191,12 @@ EJ_BIND_SET(volume, ctx, value) {
 }
 
 EJ_BIND_GET(currentTime, ctx) {
-	return JSValueMakeNumber( ctx, source ? [source getCurrentTime] : 0 );
+	return JSValueMakeNumber( ctx, source ? source.currentTime : 0 );
 }
 
 EJ_BIND_SET(currentTime, ctx, value) {
 	[self load];
-	[source setCurrentTime:JSValueToNumberFast(ctx, value)];
+	source.currentTime = JSValueToNumberFast(ctx, value);
 }
 
 EJ_BIND_GET(src, ctx) {
@@ -197,7 +205,7 @@ EJ_BIND_GET(src, ctx) {
 
 EJ_BIND_SET(src, ctx, value) {
 	[self setSourcePath:JSValueToNSString(ctx, value)];
-	if( preload == kEJAudioPreloadAuto ) {
+	if( preload != kEJAudioPreloadNone ) {
 		[self load];
 	}
 }
@@ -206,8 +214,17 @@ EJ_BIND_GET(ended, ctx) {
 	return JSValueMakeBoolean(ctx, ended);
 }
 
-EJ_BIND_ENUM(preload, EJAudioPreloadNames, self.preload);
+EJ_BIND_GET(paused, ctx) {
+	return JSValueMakeBoolean(ctx, paused);
+}
 
+EJ_BIND_ENUM(preload, self.preload,
+	"none",		// kEJAudioPreloadNone
+	"metadata", // kEJAudioPreloadMetadata
+	"auto"		// kEJAudioPreloadAuto
+);
+
+EJ_BIND_EVENT(loadedmetadata);
 EJ_BIND_EVENT(canplaythrough);
 EJ_BIND_EVENT(ended);
 

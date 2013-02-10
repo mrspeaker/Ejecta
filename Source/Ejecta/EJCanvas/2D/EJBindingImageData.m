@@ -1,10 +1,11 @@
 #import "EJBindingImageData.h"
+#import <JavaScriptCore/JSTypedArray.h>
 
 @implementation EJBindingImageData
 @synthesize imageData;
 
-- (id)initWithContext:(JSContextRef)ctx object:(JSObjectRef)obj imageData:(EJImageData *)data {
-	if( self = [super initWithContext:ctx object:obj argc:0 argv:NULL] ) {
+- (id)initWithImageData:(EJImageData *)data {
+	if( self = [super initWithContext:NULL argc:0 argv:NULL] ) {
 		imageData = [data retain];
 		dataArray = NULL;
 	}
@@ -27,17 +28,26 @@
 		JSContextRef ctx = [EJApp instance].jsGlobalContext;
 		int count = imageData.width * imageData.height * 4;
 		
-		JSObjectToByteArray(ctx, dataArray, imageData.pixels, count );
+		void * data = JSTypedArrayGetDataPtr(ctx, dataArray, NULL);
+		memcpy(imageData.pixels.mutableBytes, data, count);
 	}
 	
 	return imageData;
 }
 
+- (EJTexture *)texture {
+	return imageData.texture;
+}
+
 EJ_BIND_GET(data, ctx ) {
 	if( !dataArray ) {
 		int count = imageData.width * imageData.height * 4;
-		dataArray = ByteArrayToJSObject(ctx, imageData.pixels, count);
+		
+		dataArray = JSTypedArrayMake(ctx, kJSTypedArrayTypeUint8ClampedArray, count);
 		JSValueProtect(ctx, dataArray);
+		
+		void * data = JSTypedArrayGetDataPtr(ctx, dataArray, NULL);
+		memcpy(data, imageData.pixels.bytes, count);
 	}
 	return dataArray;
 }

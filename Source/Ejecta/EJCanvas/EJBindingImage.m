@@ -9,31 +9,18 @@
 	// JavaScript onload callback when done
 	loading = YES;
 	
-	NSInvocationOperation* loadOp = [[NSInvocationOperation alloc] initWithTarget:self
-				selector:@selector(load:) object:[EJApp instance].glContext.sharegroup];
-	[loadOp setThreadPriority:0.0];
-	[[EJApp instance].opQueue addOperation:loadOp];
-	[loadOp release];
-}
-
-- (void)load:(EAGLSharegroup *)sharegroup {
-	@autoreleasepool {	
-		NSLog(@"Loading Image: %@", path );
-		NSString * fullPath = [[EJApp instance] pathForResource:path];
-		EJTexture * tempTex = [[[EJTexture alloc] initWithPath:fullPath sharegroup:sharegroup] autorelease];
-		[self performSelectorOnMainThread:@selector(endLoad:) withObject:tempTex waitUntilDone:NO];
-	}
-}
-
-- (void)endLoad:(EJTexture *)tex {
-	loading = NO;
-	texture = [tex retain];
-	if( tex.textureId ) {
-		[self triggerEvent:@"load" argc:0 argv:NULL];
-	}
-	else {
-		[self triggerEvent:@"error" argc:0 argv:NULL];
-	}
+	// Protect this image object from garbage collection, as its callback function
+	// may be the only thing holding on to it
+	JSValueProtect([EJApp instance].jsGlobalContext, jsObject);
+	
+	NSLog(@"Loading Image: %@", path);
+	NSString * fullPath = [[EJApp instance] pathForResource:path];
+	
+	texture = [[EJTexture cachedTextureWithPath:fullPath callback:^{
+		loading = NO;
+		[self triggerEvent:(texture.textureId ? @"load" : @"error") argc:0 argv:NULL];		
+		JSValueUnprotect([EJApp instance].jsGlobalContext, jsObject);
+	}] retain];
 }
 
 - (void)dealloc {

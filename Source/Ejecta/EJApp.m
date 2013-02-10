@@ -2,8 +2,6 @@
 
 #import "EJApp.h"
 #import "EJBindingBase.h"
-#import "EJCanvas/EJCanvasContext.h"
-#import "EJCanvas/EJCanvasContextScreen.h"
 #import "EJTimer.h"
 
 
@@ -27,15 +25,9 @@ JSValueRef ej_getNativeClass(JSContextRef ctx, JSObjectRef object, JSStringRef p
 }
 
 JSObjectRef ej_callAsConstructor(JSContextRef ctx, JSObjectRef constructor, size_t argc, const JSValueRef argv[], JSValueRef* exception) {
-	id class = (id)JSObjectGetPrivate( constructor );
-	
-	JSClassRef jsClass = [[EJApp instance] getJSClassForClass:class];
-	JSObjectRef obj = JSObjectMake( ctx, jsClass, NULL );
-	
-	id instance = [(EJBindingBase *)[class alloc] initWithContext:ctx object:obj argc:argc argv:argv];
-	JSObjectSetPrivate( obj, (void *)instance );
-	
-	return obj;
+	Class class = (Class)JSObjectGetPrivate( constructor );
+	EJBindingBase * instance = [(EJBindingBase *)[class alloc] initWithContext:ctx argc:argc argv:argv];
+	return [class createJSObjectWithContext:ctx instance:instance];
 }
 
 
@@ -48,7 +40,8 @@ JSObjectRef ej_callAsConstructor(JSContextRef ctx, JSObjectRef constructor, size
 @implementation EJApp
 @synthesize landscapeMode;
 @synthesize jsGlobalContext;
-@synthesize glContext;
+@synthesize glContext2D;
+@synthesize glSharegroup;
 @synthesize window;
 @synthesize touchDelegate;
 @synthesize lifecycleDelegate;
@@ -73,7 +66,7 @@ static EJApp * ejectaInstance = NULL;
 	
 		ejectaInstance = self;
 		window = windowp;
-		[window setRootViewController:self];
+		window.rootViewController = self;
 		[UIApplication sharedApplication].idleTimerDisabled = YES;
 		
 		
@@ -98,9 +91,8 @@ static EJApp * ejectaInstance = NULL;
 		[displayLink setFrameInterval:1];
 		[displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 		
-				
+		
 		// Create the global JS context and attach the 'Ejecta' object
-		jsClasses = [[NSMutableDictionary alloc] init];
 		
 		JSClassDefinition constructorClassDef = kJSClassDefinitionEmpty;
 		constructorClassDef.callAsConstructor = ej_callAsConstructor;
@@ -123,9 +115,11 @@ static EJApp * ejectaInstance = NULL;
 			kJSPropertyAttributeDontDelete | kJSPropertyAttributeReadOnly, NULL
 		);
 		
-		// Create the OpenGL ES1 Context
-		glContext = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES1];
-		[EAGLContext setCurrentContext:glContext];
+		// Create the OpenGL context for Canvas2D
+		glContext2D = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
+		glSharegroup = glContext2D.sharegroup;
+		glCurrentContext = glContext2D;
+		[EAGLContext setCurrentContext:glCurrentContext];
 		
 		// Load the initial JavaScript source files
 		[self loadScriptAtPath:EJECTA_BOOT_JS];
@@ -140,13 +134,20 @@ static EJApp * ejectaInstance = NULL;
 	[currentRenderingContext release];
 	[touchDelegate release];
 	[lifecycleDelegate release];
-	[jsClasses release];
 	[opQueue release];
 	
 	[displayLink invalidate];
 	[displayLink release];
 	[timers release];
-	[glContext release];
+	
+	[textureCache release];
+	[openALManager release];
+	[glProgram2DFlat release];
+	[glProgram2DTexture release];
+	[glProgram2DAlphaTexture release];
+	[glProgram2DPattern release];
+	[glProgram2DRadialGradient release];
+	[glContext2D release];
 	[super dealloc];
 }
 
@@ -206,7 +207,7 @@ static EJApp * ejectaInstance = NULL;
 	if( !paused ) { return; }
 	
 	[lifecycleDelegate resume];
-	[EAGLContext setCurrentContext:glContext];
+	[EAGLContext setCurrentContext:glCurrentContext];
 	[displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 	paused = false;
 }
@@ -292,17 +293,6 @@ static EJApp * ejectaInstance = NULL;
 	return result;
 }
 
-- (JSClassRef)getJSClassForClass:(id)classId {
-	JSClassRef jsClass = [[jsClasses objectForKey:classId] pointerValue];
-	
-	// Not already loaded? Ask the objc class for the JSClassRef!
-	if( !jsClass ) {
-		jsClass = [classId getJSClass];
-		[jsClasses setObject:[NSValue valueWithPointer:jsClass] forKey:classId];
-	}
-	return jsClass;
-}
-
 - (void)logException:(JSValueRef)exception ctx:(JSContextRef)ctxp {
 	if( !exception ) return;
 	
@@ -376,10 +366,49 @@ static EJApp * ejectaInstance = NULL;
 	return NULL;
 }
 
+#define EJ_GL_PROGRAM_GETTER(TYPE, NAME) \
+- (TYPE *)glProgram2D##NAME { \
+	if( !glProgram2D##NAME ) { \
+		glProgram2D##NAME = [[TYPE alloc] initWithVertexShader:@"Vertex.vsh" fragmentShader: @ #NAME @".fsh"]; \
+	} \
+	return glProgram2D##NAME; \
+}
+
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Flat);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Texture);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, AlphaTexture);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2D, Pattern);
+EJ_GL_PROGRAM_GETTER(EJGLProgram2DRadialGradient, RadialGradient);
+
+#undef EJ_GL_PROGRAM_GETTER
+
+- (EJOpenALManager *)openALManager {
+	if( !openALManager ) {
+		openALManager = [[EJOpenALManager alloc] init];
+	}
+	return openALManager;
+}
+
+- (NSMutableDictionary *)textureCache {
+	if( !textureCache ) {
+		// Create a non-retaining Dictionary to hold the cached textures
+		textureCache = (NSMutableDictionary*)CFDictionaryCreateMutable(NULL, 8, &kCFCopyStringDictionaryKeyCallBacks, NULL);
+	}
+	return textureCache;
+}
+
 - (void)setCurrentRenderingContext:(EJCanvasContext *)renderingContext {
 	if( renderingContext != currentRenderingContext ) {
 		[currentRenderingContext flushBuffers];
 		[currentRenderingContext release];
+		
+		// Switch GL Context if different
+		if( renderingContext && renderingContext.glContext != glCurrentContext ) {
+			glFlush();
+			glCurrentContext = renderingContext.glContext;
+			[EAGLContext setCurrentContext:glCurrentContext];
+		}
+		
 		[renderingContext prepare];
 		currentRenderingContext = [renderingContext retain];
 	}
