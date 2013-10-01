@@ -1,5 +1,5 @@
 #import "EJCanvasGradient.h"
-#import "EJApp.h"
+#import "EJAppViewController.h"
 
 @implementation EJCanvasGradient
 
@@ -37,7 +37,15 @@
 }
 
 - (void)addStopWithColor:(EJColorRGBA)color at:(float)pos {
-	EJCanvasGradientColorStop stop = { .pos = pos, .color = color, .order = colorStops.count };
+	float alpha = (float)color.rgba.a/255.0;
+	EJColorRGBA premultiplied = { .rgba = {
+		.r = (float)color.rgba.r * alpha,
+		.g = (float)color.rgba.g * alpha,
+		.b = (float)color.rgba.b * alpha,
+		.a = color.rgba.a
+	}};
+	
+	EJCanvasGradientColorStop stop = { .pos = pos, .color = premultiplied, .order = colorStops.count };
 	[colorStops addObject:[NSValue value:&stop withObjCType:@encode(EJCanvasGradientColorStop)]];
 	
 	// Release current texture; it's invalid now
@@ -56,7 +64,7 @@
 - (void)rebuild {
 	// Sort color stops by positions. If two ore more stops are at the same
 	// position, ensure that the one added last (.order) will be on top
-	NSArray * sortedStops = [colorStops sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+	NSArray *sortedStops = [colorStops sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
 		EJCanvasGradientColorStop s1, s2;
 		[a getValue:&s1];
 		[b getValue:&s2];
@@ -64,7 +72,7 @@
 		return (s1.pos == s2.pos) ? (s1.order - s2.order) : (s1.pos - s2.pos);
 	}];
 	
-	NSData * pixels = [self getPixelsWithWidth:EJ_CANVAS_GRADIENT_WIDTH forSortedStops:sortedStops];
+	NSData *pixels = [self getPixelsWithWidth:EJ_CANVAS_GRADIENT_WIDTH forSortedStops:sortedStops];
 	
 	// Create or update Texture
 	if( !texture ) {
@@ -78,7 +86,7 @@
 - (NSData *)getPixelsWithWidth:(int)width forSortedStops:(NSArray *)stops {
 	
 	int byteSize = width * 4;
-	NSMutableData * pixels = [NSMutableData dataWithLength:byteSize];
+	NSMutableData *pixels = [NSMutableData dataWithLength:byteSize];
 	
 	if( !stops || !stops.count ) {
 		// No stops? return empty pixel data
@@ -86,13 +94,13 @@
 	}
 	
 	EJCanvasGradientColorStop firstStop, currentStop, nextStop;
-	[[stops objectAtIndex:0] getValue:&firstStop];
+	[stops[0] getValue:&firstStop];
 	currentStop = firstStop;
 	
-	GLubyte * bytes = pixels.mutableBytes;
+	GLubyte *bytes = pixels.mutableBytes;
 	int index = 0;
 	
-	for( NSValue * v in stops ) {
+	for( NSValue *v in stops ) {
 		[v getValue:&nextStop];
 		
 		int stopIndex = MIN(nextStop.pos * (float)byteSize, byteSize);

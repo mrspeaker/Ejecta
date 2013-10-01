@@ -1,5 +1,6 @@
 #import "EJBindingImage.h"
-#import "EJApp.h"
+#import "EJJavaScriptView.h"
+#import "EJNonRetainingProxy.h"
 
 @implementation EJBindingImage
 @synthesize texture;
@@ -11,22 +12,43 @@
 	
 	// Protect this image object from garbage collection, as its callback function
 	// may be the only thing holding on to it
-	JSValueProtect([EJApp instance].jsGlobalContext, jsObject);
+	JSValueProtect(scriptView.jsGlobalContext, jsObject);
 	
 	NSLog(@"Loading Image: %@", path);
-	NSString * fullPath = [[EJApp instance] pathForResource:path];
+	NSString *fullPath = [scriptView pathForResource:path];
 	
-	texture = [[EJTexture cachedTextureWithPath:fullPath callback:^{
-		loading = NO;
-		[self triggerEvent:(texture.textureId ? @"load" : @"error") argc:0 argv:NULL];		
-		JSValueUnprotect([EJApp instance].jsGlobalContext, jsObject);
-	}] retain];
+	// Use a non-retaining proxy for the callback operation and take care that the
+	// loadCallback is always cancelled when dealloc'ing
+	loadCallback = [[NSInvocationOperation alloc]
+		initWithTarget:[EJNonRetainingProxy proxyWithTarget:self]
+		selector:@selector(endLoad) object:nil];
+	
+	texture = [[EJTexture cachedTextureWithPath:fullPath
+		loadOnQueue:scriptView.backgroundQueue callback:loadCallback] retain];
+}
+
+- (void)prepareGarbageCollection {
+	[loadCallback cancel];
+	[loadCallback release];
+	loadCallback = nil;
 }
 
 - (void)dealloc {
+	[loadCallback cancel];
+	[loadCallback release];
+	
 	[texture release];
 	[path release];
 	[super dealloc];
+}
+
+- (void)endLoad {
+	loading = NO;
+	[loadCallback release];
+	loadCallback = nil;
+	
+	[self triggerEvent:(texture.textureId ? @"load" : @"error")];
+	JSValueUnprotect(scriptView.jsGlobalContext, jsObject);
 }
 
 EJ_BIND_GET(src, ctx ) { 
@@ -41,7 +63,7 @@ EJ_BIND_SET(src, ctx, value) {
 	// This will break some edge cases; FIXME
 	if( loading ) { return; }
 	
-	NSString * newPath = JSValueToNSString( ctx, value );
+	NSString *newPath = JSValueToNSString( ctx, value );
 	
 	// Same as the old path? Nothing to do here
 	if( [path isEqualToString:newPath] ) { return; }
@@ -56,7 +78,7 @@ EJ_BIND_SET(src, ctx, value) {
 		texture = nil;
 	}
 	
-	if( [newPath length] ) {
+	if( !JSValueIsNull(ctx, value) && [newPath length] ) {
 		path = [newPath retain];
 		[self beginLoad];
 	}

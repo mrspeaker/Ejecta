@@ -1,33 +1,36 @@
 #import "EJBindingDeviceMotion.h"
+#import "EJJavaScriptView.h"
 
 @implementation EJBindingDeviceMotion
 
-- (id)initWithContext:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv {
-	if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
-		
-		interval = 1.0f/60.0f;
-		motionManager = [[CMMotionManager alloc] init];
-		NSOperationQueue * queue = [EJApp instance].opQueue;
-		
-		// Has Gyro? (iPhone4 and newer)
-		if( motionManager.isDeviceMotionAvailable ) {
-			motionManager.deviceMotionUpdateInterval = interval;
-			[motionManager startDeviceMotionUpdatesToQueue:queue withHandler:
-				^(CMDeviceMotion *motion, NSError *error) {
-					[self triggerEventWithMotion:motion];
-				}];
-		}
-		
-		// Only basic accelerometer data
-		else {
-			motionManager.accelerometerUpdateInterval = interval;
-			[motionManager startAccelerometerUpdatesToQueue:queue withHandler:
-				^(CMAccelerometerData *accelerometerData, NSError *error) {
-					[self triggerEventWithAccelerometerData:accelerometerData];
-				}];
-		}
+- (void)createWithJSObject:(JSObjectRef)obj scriptView:(EJJavaScriptView *)view {
+	[super createWithJSObject:obj scriptView:view];
+	interval = 1.0f/60.0f;
+	motionManager = [[CMMotionManager alloc] init];
+	
+	// Has Gyro? (iPhone4 and newer)
+	if( motionManager.isDeviceMotionAvailable ) {
+		motionManager.deviceMotionUpdateInterval = interval;
+		[motionManager startDeviceMotionUpdates];
 	}
-	return self;
+	
+	// Only basic accelerometer data
+	else {
+		motionManager.accelerometerUpdateInterval = interval;
+		[motionManager startAccelerometerUpdates];
+	}
+	
+	scriptView.deviceMotionDelegate	= self;
+}
+
+- (void)prepareGarbageCollection {
+	[motionManager stopDeviceMotionUpdates];
+	[motionManager stopAccelerometerUpdates];
+}
+
+- (void)dealloc {
+	[motionManager release];
+	[super dealloc];
 }
 
 
@@ -35,7 +38,7 @@ static const float g = 9.80665;
 static const float radToDeg = (180/M_PI);
 
 - (void)triggerEventWithMotion:(CMDeviceMotion *)motion {
-	JSContextRef ctx = [EJApp instance].jsGlobalContext;
+	JSContextRef ctx = scriptView.jsGlobalContext;
 	
 	// accelerationIncludingGravity {x, y, z}
 	params[0] = JSValueMakeNumber(ctx, (motion.userAcceleration.x + motion.gravity.x) * g);
@@ -61,7 +64,7 @@ static const float radToDeg = (180/M_PI);
 }
 
 - (void)triggerEventWithAccelerometerData:(CMAccelerometerData *)accel {
-	JSContextRef ctx = [EJApp instance].jsGlobalContext;
+	JSContextRef ctx = scriptView.jsGlobalContext;
 	
 	// accelerationIncludingGravity {x, y, z}
 	params[0] = JSValueMakeNumber(ctx, accel.acceleration.x * g);
@@ -69,6 +72,15 @@ static const float radToDeg = (180/M_PI);
 	params[2] = JSValueMakeNumber(ctx, accel.acceleration.z * g);
 	
 	[self triggerEvent:@"acceleration" argc:3 argv:params];
+}
+
+- (void)triggerDeviceMotionEvents {
+	if( motionManager.isDeviceMotionAvailable ) {
+		[self triggerEventWithMotion:motionManager.deviceMotion];
+	}
+	else {
+		[self triggerEventWithAccelerometerData:motionManager.accelerometerData];
+	}
 }
 
 EJ_BIND_GET(interval, ctx) {

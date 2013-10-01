@@ -1,100 +1,102 @@
 #import <QuartzCore/QuartzCore.h>
 #import "EJCanvasContext2DScreen.h"
-#import "EJApp.h"
+#import "EJJavaScriptView.h"
+#import "EJJavaScriptView.h"
 
 @implementation EJCanvasContext2DScreen
+@synthesize style;
 
-@synthesize scalingMode;
-
-
-- (void)create {
-	// Work out the final screen size - this takes the scalingMode, canvas size, 
-	// screen size and retina properties into account
-	
-	CGRect frame = CGRectMake(0, 0, width, height);
-	CGSize screen = app.view.bounds.size;
-    float contentScale = (useRetinaResolution && [UIScreen mainScreen].scale == 2) ? 2 : 1;
-	float aspect = frame.size.width / frame.size.height;
-	
-	if( scalingMode == kEJScalingModeFitWidth ) {
-		frame.size.width = screen.width;
-		frame.size.height = screen.width / aspect;
+- (id)initWithScriptView:(EJJavaScriptView *)scriptViewp width:(short)widthp height:(short)heightp style:(CGRect)stylep {
+	if( self = [super initWithScriptView:scriptViewp width:widthp height:heightp] ) {
+		style = stylep;
 	}
-	else if( scalingMode == kEJScalingModeFitHeight ) {
-		frame.size.width = screen.height * aspect;
-		frame.size.height = screen.height;
+	return self;
+}
+
+- (void)dealloc {
+	[glview removeFromSuperview];
+	[glview release];
+	[super dealloc];
+}
+
+- (void)setStyle:(CGRect)newStyle {
+	if(
+		(style.size.width ? style.size.width : width) != newStyle.size.width ||
+		(style.size.height ? style.size.height : height) != newStyle.size.height
+	) {
+		// Must resize
+		style = newStyle;
+		[self resizeToWidth:width height:height];
 	}
-	float internalScaling = frame.size.width / (float)width;
-	app.internalScaling = internalScaling;
+	else {
+		// Just reposition
+		style = newStyle;
+		if( glview ) {
+			glview.frame = self.frame;
+		}
+	}
+}
+
+- (CGRect)frame {
+	// Returns the view frame with the current style. If the style's witdth/height
+	// is zero, the canvas width/height is used
+	return CGRectMake(
+		style.origin.x,
+		style.origin.y,
+		(style.size.width ? style.size.width : width),
+		(style.size.height ? style.size.height : height)
+	);
+}
+
+- (void)resizeToWidth:(short)newWidth height:(short)newHeight {
+	[self flushBuffers];
 	
-	backingStoreRatio = internalScaling * contentScale;
+	width = newWidth;
+	height = newHeight;
+	
+	
+	CGRect frame = self.frame;
+	
+	float contentScale = (useRetinaResolution && [UIScreen mainScreen].scale == 2) ? 2 : 1;
+	backingStoreRatio = (frame.size.width / (float)width) * contentScale;
 	
 	bufferWidth = frame.size.width * contentScale;
 	bufferHeight = frame.size.height * contentScale;
 	
 	NSLog(
 		@"Creating ScreenCanvas (2D): "
-			@"size: %dx%d, aspect ratio: %.3f, "
-			@"scaled: %.3f = %.0fx%.0f, "
+			@"size: %dx%d, "
+			@"style: %.0fx%.0f, "
 			@"retina: %@ = %.0fx%.0f, "
 			@"msaa: %@",
-		width, height, aspect, 
-		internalScaling, frame.size.width, frame.size.height,
+		width, height, 
+		frame.size.width, frame.size.height,
 		(useRetinaResolution ? @"yes" : @"no"),
 		frame.size.width * contentScale, frame.size.height * contentScale,
 		(msaaEnabled ? [NSString stringWithFormat:@"yes (%d samples)", msaaSamples] : @"no")
 	);
 	
-	// Create the OpenGL UIView with final screen size and content scaling (retina)
-	glview = [[EAGLView alloc] initWithFrame:frame contentScale:contentScale retainedBacking:YES];
 	
-	// This creates the frame- and renderbuffers
-	[super create];
+	if( !glview ) {
+		// Create the OpenGL UIView with final screen size and content scaling (retina)
+		glview = [[EAGLView alloc] initWithFrame:frame contentScale:contentScale retainedBacking:YES];
+		
+		// Append the OpenGL view to Ejecta's main view
+		[scriptView addSubview:glview];
+	}
+	else {
+		// Resize an existing view
+		glview.frame = frame;
+	}
 	
-	// Set up the renderbuffer and some initial OpenGL properties
+	// Set up the renderbuffer
 	[glContext renderbufferStorage:GL_RENDERBUFFER fromDrawable:(CAEAGLLayer *)glview.layer];
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, viewRenderBuffer);
 	
 	// Flip the screen - OpenGL has the origin in the bottom left corner. We want the top left.
-	vertexScale = EJVector2Make(2.0f/width, 2.0f/-height);
-	vertexTranslate = EJVector2Make(-1.0f, 1.0f);
+	upsideDown = true;
 	
-	[self prepare];
-	
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-	// Append the OpenGL view to Impact's main view
-	[app hideLoadingScreen];
-	[app.view addSubview:glview];
-}
-
-- (void)dealloc {
-	[glview release];
-	[super dealloc];
-}
-
-
-- (void)setWidth:(short)newWidth {
-	if( newWidth != width ) {
-		NSLog(@"Warning: Can't change size of the screen rendering context");
-	}
-}
-
-- (void)setHeight:(short)newHeight {
-	if( newHeight != height ) {
-		NSLog(@"Warning: Can't change size of the screen rendering context");
-	}
-}
-
-- (EJImageData*)getImageDataSx:(short)sx sy:(short)sy sw:(short)sw sh:(short)sh {
-	// Take care of the flipped screen layout
-	return [self getImageDataScaled:backingStoreRatio flipped:YES sx:sx sy:sy sw:sw sh:sh];
-}
-
-- (EJImageData*)getImageDataHDSx:(short)sx sy:(short)sy sw:(short)sw sh:(short)sh {
-	// Take care of the flipped screen layout
-	return [self getImageDataScaled:1 flipped:YES sx:sx sy:sy sw:sw sh:sh];
+	[super resetFramebuffer];
 }
 
 - (void)finish {
@@ -103,6 +105,8 @@
 
 - (void)present {
 	[self flushBuffers];
+	
+	if( !needsPresenting ) { return; }
 	
 	if( msaaEnabled ) {
 		//Bind the MSAA and View frameBuffers and resolve
@@ -116,7 +120,24 @@
 	}
 	else {
 		[glContext presentRenderbuffer:GL_RENDERBUFFER];
-	}	
+	}
+	needsPresenting = NO;
+}
+
+- (EJTexture *)texture {
+	// This context may not be the current one, but it has to be in order for
+	// glReadPixels to succeed.
+	EJCanvasContext *previousContext = scriptView.currentRenderingContext;
+	scriptView.currentRenderingContext = self;
+
+	float w = width * backingStoreRatio;
+	float h = height * backingStoreRatio;
+	
+	EJTexture *texture = [self getImageDataScaled:1 flipped:upsideDown sx:0 sy:0 sw:w sh:h].texture;
+	texture.contentScale = backingStoreRatio;
+	
+	scriptView.currentRenderingContext = previousContext;
+	return texture;
 }
 
 @end

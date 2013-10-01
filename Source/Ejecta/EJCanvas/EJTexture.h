@@ -3,28 +3,7 @@
 #import <OpenGLES/ES1/gl.h>
 #import <OpenGLES/ES1/glext.h>
 
-typedef enum {
-	kEJTextureParamMinFilter,
-	kEJTextureParamMagFilter,
-	kEJTextureParamWrapS,
-	kEJTextureParamWrapT,
-	kEJTextureParamLast
-} EJTextureParam;
-
-typedef EJTextureParam EJTextureParams[kEJTextureParamLast];
-
-
-@interface EJTextureStorage : NSObject {
-	EJTextureParams params;
-	GLuint textureId;
-	BOOL immutable;
-}
-- (id)init;
-- (id)initImmutable;
-- (void)bindToTarget:(GLenum)target withParams:(EJTextureParam *)newParams;
-@property (readonly, nonatomic) GLuint textureId;
-@property (readonly, nonatomic) BOOL immutable;
-@end
+#import "EJTextureStorage.h"
 
 
 typedef enum {
@@ -34,21 +13,22 @@ typedef enum {
 
 @interface EJTexture : NSObject <NSCopying> {
 	BOOL cached;
+	BOOL isCompressed;
 	short width, height;
-	NSString * fullPath;
-	EJTextureStorage * textureStorage;
+	NSString *fullPath;
+	EJTextureStorage *textureStorage;
 	GLenum format;
 	GLuint fbo;
 	float contentScale;
 	
 	EJTextureOwningContext owningContext;
 	EJTextureParams params;
-	NSOperation * loadCallback;
+	NSBlockOperation *loadCallback;
 }
 - (id)initEmptyForWebGL;
 - (id)initWithPath:(NSString *)path;
-+ (id)cachedTextureWithPath:(NSString *)path callback:(void (^)(void))callback;
-- (id)initWithPath:(NSString *)path callback:(void (^)(void))callback;
++ (id)cachedTextureWithPath:(NSString *)path loadOnQueue:(NSOperationQueue *)queue callback:(NSOperation *)callback;
+- (id)initWithPath:(NSString *)path loadOnQueue:(NSOperationQueue *)queue callback:(NSOperation *)callback;
 
 - (id)initWithWidth:(int)widthp height:(int)heightp;
 - (id)initWithWidth:(int)widthp height:(int)heightp format:(GLenum) format;
@@ -60,11 +40,10 @@ typedef enum {
 - (void)createWithTexture:(EJTexture *)other;
 - (void)createWithPixels:(NSData *)pixels format:(GLenum)format;
 - (void)createWithPixels:(NSData *)pixels format:(GLenum)formatp target:(GLenum)target;
+- (void)uploadCompressedPixels:(NSData *)pixels target:(GLenum)target;
 - (void)updateWithPixels:(NSData *)pixels atX:(int)x y:(int)y width:(int)subWidth height:(int)subHeight;
 
 - (NSMutableData *)loadPixelsFromPath:(NSString *)path;
-- (NSMutableData *)loadPixelsWithCGImageFromPath:(NSString *)path;
-- (NSMutableData *)loadPixelsWithLodePNGFromPath:(NSString *)path;
 
 - (GLint)getParam:(GLenum)pname;
 - (void)setParam:(GLenum)pname param:(GLenum)param;
@@ -72,9 +51,16 @@ typedef enum {
 - (void)bindWithFilter:(GLenum)filter;
 - (void)bindToTarget:(GLenum)target;
 
+- (UIImage *)image;
++ (UIImage *)imageWithPixels:(NSData *)pixels width:(int)width height:(int)height scale:(float)scale;
+
++ (void)premultiplyPixels:(const GLubyte *)inPixels to:(GLubyte *)outPixels byteLength:(int)byteLength format:(GLenum)format;
++ (void)unPremultiplyPixels:(const GLubyte *)inPixels to:(GLubyte *)outPixels byteLength:(int)byteLength format:(GLenum)format;
++ (void)flipPixelsY:(GLubyte *)pixels bytesPerRow:(int)bytesPerRow rows:(int)rows;
+
 @property (readonly, nonatomic) BOOL isDynamic;
-@property (readonly, nonatomic) NSMutableData * pixels;
-@property (readonly, nonatomic)	float contentScale;
+@property (readonly, nonatomic) NSMutableData *pixels;
+@property (readwrite, nonatomic) float contentScale;
 @property (readonly, nonatomic) GLuint textureId;
 @property (readonly, nonatomic) GLenum format;
 @property (readonly, nonatomic) short width, height;

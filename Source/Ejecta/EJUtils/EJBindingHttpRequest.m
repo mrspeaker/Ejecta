@@ -1,13 +1,19 @@
 #import "EJBindingHttpRequest.h"
 #import <JavaScriptCore/JSTypedArray.h>
+#import "EJJavaScriptView.h"
 
 @implementation EJBindingHttpRequest
 
 - (id)initWithContext:(JSContextRef)ctxp argc:(size_t)argc argv:(const JSValueRef [])argv {
-	if( self  = [super initWithContext:ctxp argc:argc argv:argv] ) {
+	if( self = [super initWithContext:ctxp argc:argc argv:argv] ) {
 		requestHeaders = [[NSMutableDictionary alloc] init];
 	}
 	return self;
+}
+
+- (void)prepareGarbageCollection {
+	[self clearRequest];
+	[self clearConnection];
 }
 
 - (void) dealloc {
@@ -60,30 +66,30 @@
 
 - (void)connection:(NSURLConnection *)connection willSendRequestForAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge {
 	if( user && password && [challenge previousFailureCount] == 0 ) {
-        NSURLCredential * credentials = [NSURLCredential
+		NSURLCredential *credentials = [NSURLCredential
 			credentialWithUser:user
 			password:password
 			persistence:NSURLCredentialPersistenceNone];
 		[[challenge sender] useCredential:credentials forAuthenticationChallenge:challenge];
-    }
+	}
 	else if( [challenge previousFailureCount] == 0 ) {
 		[[challenge sender] continueWithoutCredentialForAuthenticationChallenge:challenge];
 	}
 	else {
 		[[challenge sender] cancelAuthenticationChallenge:challenge];
 		state = kEJHttpRequestStateDone;
-		[self triggerEvent:@"abort" argc:0 argv:NULL];
+		[self triggerEvent:@"abort"];
 		NSLog(@"XHR: Aborting Request %@ - wrong credentials", url);
-    }
+	}
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)connectionp {
 	state = kEJHttpRequestStateDone;
 	
 	[connection release]; connection = NULL;
-	[self triggerEvent:@"load" argc:0 argv:NULL];
-	[self triggerEvent:@"loadend" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	[self triggerEvent:@"load"];
+	[self triggerEvent:@"loadend"];
+	[self triggerEvent:@"readystatechange"];
 }
 
 - (void)connection:(NSURLConnection *)connectionp didFailWithError:(NSError *)error {
@@ -91,13 +97,13 @@
 	
 	[connection release]; connection = NULL;
 	if( error.code == kCFURLErrorTimedOut ) {
-		[self triggerEvent:@"timeout" argc:0 argv:NULL];
+		[self triggerEvent:@"timeout"];
 	}
 	else {
-		[self triggerEvent:@"error" argc:0 argv:NULL];
+		[self triggerEvent:@"error"];
 	}
-	[self triggerEvent:@"loadend" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	[self triggerEvent:@"loadend"];
+	[self triggerEvent:@"readystatechange"];
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)responsep {
@@ -105,8 +111,15 @@
 	
 	[response release];
 	response = (NSHTTPURLResponse *)[responsep retain];
-	[self triggerEvent:@"progress" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	
+	JSContextRef ctx = scriptView.jsGlobalContext;
+	[self triggerEvent:@"progress" properties:(JSEventProperty[]){
+		{"lengthComputable", JSValueMakeBoolean(ctx, response.expectedContentLength != NSURLResponseUnknownLength)},
+		{"total", JSValueMakeNumber(ctx, response.expectedContentLength)},
+		{"loaded", JSValueMakeNumber(ctx, responseBody.length)},
+		{NULL, NULL}
+	}];
+	[self triggerEvent:@"readystatechange"];
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
@@ -116,8 +129,15 @@
 		responseBody = [[NSMutableData alloc] initWithCapacity:1024 * 10]; // 10kb
 	}
 	[responseBody appendData:data];
-	[self triggerEvent:@"progress" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	
+	JSContextRef ctx = scriptView.jsGlobalContext;
+	[self triggerEvent:@"progress" properties:(JSEventProperty[]){
+		{"lengthComputable", JSValueMakeBoolean(ctx, response.expectedContentLength != NSURLResponseUnknownLength)},
+		{"total", JSValueMakeNumber(ctx, response.expectedContentLength)},
+		{"loaded", JSValueMakeNumber(ctx, responseBody.length)},
+		{NULL, NULL}
+	}];
+	[self triggerEvent:@"readystatechange"];
 }
 
 
@@ -145,17 +165,17 @@ EJ_BIND_FUNCTION(open, ctx, argc, argv) {
 EJ_BIND_FUNCTION(setRequestHeader, ctx, argc, argv) {
 	if( argc < 2 ) { return NULL; }
 	
-	NSString * header = JSValueToNSString( ctx, argv[0] );
-	NSString * value = JSValueToNSString( ctx, argv[1] );
+	NSString *header = JSValueToNSString( ctx, argv[0] );
+	NSString *value = JSValueToNSString( ctx, argv[1] );
 	
-	[requestHeaders setObject:value forKey:header];
+	requestHeaders[header] = value;
 	return NULL;
 }
 
 EJ_BIND_FUNCTION(abort, ctx, argc, argv) {
 	if( connection ) {
 		[self clearConnection];
-		[self triggerEvent:@"abort" argc:0 argv:NULL];
+		[self triggerEvent:@"abort"];
 	}
 	return NULL;
 }
@@ -165,11 +185,10 @@ EJ_BIND_FUNCTION(getAllResponseHeaders, ctx, argc, argv) {
 		return NULL;
 	}
 	
-	NSHTTPURLResponse * urlResponse = (NSHTTPURLResponse *)response;
-	NSMutableString * headers = [NSMutableString string];
-	for( NSString * key in urlResponse.allHeaderFields ) {
-		id value = [urlResponse.allHeaderFields objectForKey:key];
-		[headers appendFormat:@"%@: %@\n", key, value];
+	NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)response;
+	NSMutableString *headers = [NSMutableString string];
+	for( NSString *key in urlResponse.allHeaderFields ) {
+		[headers appendFormat:@"%@: %@\n", key, urlResponse.allHeaderFields[key]];
 	}
 	
 	return NSStringToJSValue(ctx, headers);
@@ -180,9 +199,9 @@ EJ_BIND_FUNCTION(getResponseHeader, ctx, argc, argv) {
 		return NULL;
 	}
 	
-	NSHTTPURLResponse * urlResponse = (NSHTTPURLResponse *)response;
-	NSString * header = JSValueToNSString( ctx, argv[0] );
-	NSString * value = [urlResponse.allHeaderFields objectForKey:header];
+	NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)response;
+	NSString *header = JSValueToNSString( ctx, argv[0] );
+	NSString *value = urlResponse.allHeaderFields[header];
 	
 	return value ? NSStringToJSValue(ctx, value) : NULL;
 }
@@ -197,21 +216,21 @@ EJ_BIND_FUNCTION(send, ctx, argc, argv) {
 	
 	[self clearConnection];
 
-	NSURL * requestUrl = [NSURL URLWithString:url];
+	NSURL *requestUrl = [NSURL URLWithString:url];
 	if( !requestUrl.host ) {
 		// No host? Assume we have a local file
-		requestUrl = [NSURL fileURLWithPath:[[EJApp instance] pathForResource:url]];
+		requestUrl = [NSURL fileURLWithPath:[scriptView pathForResource:requestUrl.path]];
 	}
-	NSMutableURLRequest * request = [[NSMutableURLRequest alloc] initWithURL:requestUrl];
+	NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:requestUrl];
 	[request setHTTPMethod:method];
 	
-	for( NSString * header in requestHeaders ) {
-		[request setValue:[requestHeaders objectForKey:header] forHTTPHeaderField:header];
+	for( NSString *header in requestHeaders ) {
+		[request setValue:requestHeaders[header] forHTTPHeaderField:header];
 	}
 	
 	if( argc > 0 ) {
-		NSString * requestBody = JSValueToNSString( ctx, argv[0] );
-		NSData * requestData = [NSData dataWithBytes:[requestBody UTF8String] length:[requestBody length]];
+		NSString *requestBody = JSValueToNSString( ctx, argv[0] );
+		NSData *requestData = [NSData dataWithBytes:[requestBody UTF8String] length:[requestBody length]];
 		[request setHTTPBody:requestData];
 	}
 	
@@ -221,29 +240,29 @@ EJ_BIND_FUNCTION(send, ctx, argc, argv) {
 	}	
 	
 	NSLog(@"XHR: %@ %@", method, url);
-	[self triggerEvent:@"loadstart" argc:0 argv:NULL];
+	[self triggerEvent:@"loadstart"];
 	
 	if( async ) {
 		state = kEJHttpRequestStateLoading;
 		connection = [[NSURLConnection alloc] initWithRequest:request delegate:self];
 	}
 	else {	
-		NSData * data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:nil];
+		NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:nil];
 		responseBody = [[NSMutableData alloc] initWithData:data];
 		[response retain];
 		
 		state = kEJHttpRequestStateDone;
 		if( [response isKindOfClass:[NSHTTPURLResponse class]] ) {
-			NSHTTPURLResponse * urlResponse = (NSHTTPURLResponse *)response;
+			NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)response;
 			if( urlResponse.statusCode == 200 ) {
-				[self triggerEvent:@"load" argc:0 argv:NULL];
+				[self triggerEvent:@"load"];
 			}
 		}
 		else {
-			[self triggerEvent:@"load" argc:0 argv:NULL];
+			[self triggerEvent:@"load"];
 		}
-		[self triggerEvent:@"loadend" argc:0 argv:NULL];
-		[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+		[self triggerEvent:@"loadend"];
+		[self triggerEvent:@"readystatechange"];
 	}
 	[request release];
 	
@@ -264,7 +283,7 @@ EJ_BIND_GET(response, ctx) {
 	}
 	
 	
-	NSString * responseText = [self getResponseText];
+	NSString *responseText = [self getResponseText];
 	if( !responseText ) { return NULL; }
 	
 	if( type == kEJHttpRequestTypeJSON ) {
@@ -279,7 +298,7 @@ EJ_BIND_GET(response, ctx) {
 }
 
 EJ_BIND_GET(responseText, ctx) {
-	NSString * responseText = [self getResponseText];	
+	NSString *responseText = [self getResponseText];	
 	return responseText ? NSStringToJSValue( ctx, responseText ) : NULL;
 }
 
@@ -289,7 +308,7 @@ EJ_BIND_GET(status, ctx) {
 
 EJ_BIND_GET(statusText, ctx) {
 	// FIXME: should be "200 OK" instead of just "200"
-	NSString * code = [NSString stringWithFormat:@"%d", [self getStatusCode]];	
+	NSString *code = [NSString stringWithFormat:@"%d", [self getStatusCode]];	
 	return NSStringToJSValue(ctx, code);
 }
 

@@ -1,4 +1,5 @@
 #import "EJBindingGameCenter.h"
+#import "EJJavaScriptView.h"
 
 @implementation EJBindingGameCenter
 
@@ -18,18 +19,20 @@
 	[GKAchievement loadAchievementsWithCompletionHandler:^(NSArray *loadedAchievements, NSError *error) {
 		if( !error ) {
 			for (GKAchievement* achievement in loadedAchievements) {
-				[achievements setObject:achievement forKey:achievement.identifier];
+				achievements[achievement.identifier] = achievement;
 			}
 		}
 	}];
 }
 
 - (void)leaderboardViewControllerDidFinish:(GKLeaderboardViewController *)viewController {
-	[[EJApp instance] dismissModalViewControllerAnimated:YES];
+	[viewController.presentingViewController dismissModalViewControllerAnimated:YES];
+	viewIsActive = false;
 }
 
 - (void)achievementViewControllerDidFinish:(GKAchievementViewController *)viewController {
-	[[EJApp instance] dismissModalViewControllerAnimated:YES];
+	[viewController.presentingViewController dismissModalViewControllerAnimated:YES];
+	viewIsActive = false;
 }
 
 
@@ -51,27 +54,37 @@ EJ_BIND_FUNCTION( authenticate, ctx, argc, argv ) {
 			NSLog(@"GameKit: Auth failed: %@", error );
 		}
 		
-		[[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:authed] forKey:kEJBindingGameCenterAutoAuth];
+		int autoAuth = authed
+			? kEJGameCenterAutoAuthSucceeded
+			: kEJGameCenterAutoAuthFailed;
+		[[NSUserDefaults standardUserDefaults] setObject:@(autoAuth) forKey:kEJGameCenterAutoAuth];
 		[[NSUserDefaults standardUserDefaults] synchronize];
 		
 		if( callback ) {
-			JSContextRef gctx = [EJApp instance].jsGlobalContext;
+			JSContextRef gctx = scriptView.jsGlobalContext;
 			JSValueRef params[] = { JSValueMakeBoolean(gctx, error) };
-			[[EJApp instance] invokeCallback:callback thisObject:NULL argc:1 argv:params];
-			JSValueUnprotect(gctx, callback);
+			[scriptView invokeCallback:callback thisObject:NULL argc:1 argv:params];
+			JSValueUnprotectSafe(gctx, callback);
 		}
 	}];
 	return NULL;
 }
 
 EJ_BIND_FUNCTION( softAuthenticate, ctx, argc, argv ) {
-	// Check if the last auth was successful and if so, auto auth this time
-	NSNumber * autoAuth = [[NSUserDefaults standardUserDefaults] objectForKey:kEJBindingGameCenterAutoAuth];
-	if( autoAuth && [autoAuth boolValue] ) {
+	// Check if the last auth was successful or never tried and if so, auto auth this time
+	int autoAuth = [[[NSUserDefaults standardUserDefaults] objectForKey:kEJGameCenterAutoAuth] intValue];
+	if(
+		autoAuth == kEJGameCenterAutoAuthNeverTried ||
+		autoAuth == kEJGameCenterAutoAuthSucceeded
+	) {
 		[self _func_authenticate:ctx argc:argc argv:argv];
 	}
-	else if( argc > 0 ) {
+	else if( argc > 0 && JSValueIsObject(ctx, argv[0]) ) {
 		NSLog(@"GameKit: Skipping soft auth.");
+		
+		JSObjectRef callback = JSValueToObject(ctx, argv[0], NULL);
+		JSValueRef params[] = { JSValueMakeBoolean(ctx, true) };
+		[scriptView invokeCallback:callback thisObject:NULL argc:1 argv:params];
 	}
 	return NULL;
 }
@@ -89,16 +102,16 @@ EJ_BIND_FUNCTION( reportScore, ctx, argc, argv ) {
 		JSValueProtect(ctx, callback);
 	}
 	
-    GKScore *scoreReporter = [[[GKScore alloc] initWithCategory:category] autorelease];
+	GKScore *scoreReporter = [[[GKScore alloc] initWithCategory:category] autorelease];
 	if( scoreReporter ) {
 		scoreReporter.value = score;
 
 		[scoreReporter reportScoreWithCompletionHandler:^(NSError *error) {
 			if( callback ) {
-				JSContextRef gctx = [EJApp instance].jsGlobalContext;
+				JSContextRef gctx = scriptView.jsGlobalContext;
 				JSValueRef params[] = { JSValueMakeBoolean(gctx, error) };
-				[[EJApp instance] invokeCallback:callback thisObject:NULL argc:1 argv:params];
-				JSValueUnprotect(gctx, callback);
+				[scriptView invokeCallback:callback thisObject:NULL argc:1 argv:params];
+				JSValueUnprotectSafe(gctx, callback);
 			}
 		}];
 	}
@@ -107,15 +120,17 @@ EJ_BIND_FUNCTION( reportScore, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( showLeaderboard, ctx, argc, argv ) {
-	if( argc < 1 ) { return NULL; }
+	if( argc < 1 || viewIsActive ) { return NULL; }
 	if( !authed ) { NSLog(@"GameKit Error: Not authed. Can't show leaderboard."); return NULL; }
 	
-    GKLeaderboardViewController * leaderboard = [[[GKLeaderboardViewController alloc] init] autorelease];
-    if( leaderboard ) {
-        leaderboard.leaderboardDelegate = self;
+	GKLeaderboardViewController *leaderboard = [[[GKLeaderboardViewController alloc] init] autorelease];
+	if( leaderboard ) {
+		viewIsActive = true;
+		leaderboard.leaderboardDelegate = self;
 		leaderboard.category = JSValueToNSString(ctx, argv[0]);
-		[[EJApp instance] presentModalViewController:leaderboard animated:YES];
-    }
+		
+		[scriptView.window.rootViewController presentModalViewController:leaderboard animated:YES];
+	}
 	
 	return NULL;
 }
@@ -126,7 +141,7 @@ EJ_BIND_FUNCTION( showLeaderboard, ctx, argc, argv ) {
 {
 	if( !authed ) { NSLog(@"GameKit Error: Not authed. Can't report achievment."); return; }
 	
-	GKAchievement * achievement = [achievements objectForKey:identifier];
+	GKAchievement *achievement = achievements[identifier];
 	if( achievement ) {		
 		// Already reported with same or higher percentage or already at 100%?
 		if(
@@ -152,13 +167,13 @@ EJ_BIND_FUNCTION( showLeaderboard, ctx, argc, argv ) {
 	}
 	
 	[achievement reportAchievementWithCompletionHandler:^(NSError *error) {
-		[achievements setObject:achievement forKey:identifier];
+		achievements[identifier] = achievement;
 		
 		if( callback ) {
-			JSContextRef gctx = [EJApp instance].jsGlobalContext;
+			JSContextRef gctx = scriptView.jsGlobalContext;
 			JSValueRef params[] = { JSValueMakeBoolean(gctx, error) };
-			[[EJApp instance] invokeCallback:callback thisObject:NULL argc:1 argv:params];
-			JSValueUnprotect(gctx, callback);
+			[scriptView invokeCallback:callback thisObject:NULL argc:1 argv:params];
+			JSValueUnprotectSafe(gctx, callback);
 		}
 	}];
 }
@@ -194,13 +209,15 @@ EJ_BIND_FUNCTION( reportAchievementAdd, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( showAchievements, ctx, argc, argv ) {
+	if( viewIsActive ) { return NULL; }
 	if( !authed ) { NSLog(@"GameKit Error: Not authed. Can't show achievements."); return NULL; }
 	
 	GKAchievementViewController *achievementView = [[[GKAchievementViewController alloc] init] autorelease];
-    if( achievementView ) {
+	if( achievementView ) {
+		viewIsActive = true;
 		achievementView.achievementDelegate = self;
-		[[EJApp instance] presentModalViewController:achievementView animated:YES];
-    }
+		[scriptView.window.rootViewController presentModalViewController:achievementView animated:YES];
+	}
 	return NULL;
 }
 

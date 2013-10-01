@@ -14,31 +14,37 @@
 #define EJ_CANVAS_MAX_TEXTURE_UNITS 8
 #define EJ_BUFFER_OFFSET(i) ((char *)NULL + (i))
 
+#define EJ_BIND_CONST_GL(NAME) EJ_BIND_CONST(NAME, GL_##NAME)
+
 typedef struct {
-	EJTexture * texture;
+	EJTexture *texture;
 	JSObjectRef jsTexture;
-	EJTexture * cubeMap;
+	EJTexture *cubeMap;
 	JSObjectRef jsCubeMap;
 } EJCanvasContextTextureUnit;
 
+@class EJJavaScriptView;
 @interface EJBindingCanvasContextWebGL : EJBindingBase {
 	
 	BOOL unpackFlipY;
 	BOOL premultiplyAlpha;
 	
 	JSObjectRef jsCanvas;
-	EJCanvasContextWebGL * renderingContext;
-	EJApp * ejectaInstance;
+	EJCanvasContextWebGL *renderingContext;
 	
-	NSMutableDictionary * renderbuffers;
-	NSMutableDictionary * framebuffers;
-	NSMutableDictionary * buffers;
-	NSMutableDictionary * textures;
-	NSMutableDictionary * programs;
-	NSMutableDictionary * shaders;
+	NSMutableDictionary *renderbuffers;
+	NSMutableDictionary *framebuffers;
+	NSMutableDictionary *buffers;
+	NSMutableDictionary *textures;
+	NSMutableDictionary *programs;
+	NSMutableDictionary *shaders;
 	
+    NSMutableDictionary *extensions;
+    
+    NSMutableDictionary *vertexArrays;
+    
 	EJCanvasContextTextureUnit textureUnits[EJ_CANVAS_MAX_TEXTURE_UNITS];
-	EJCanvasContextTextureUnit * activeTexture;
+	EJCanvasContextTextureUnit *activeTexture;
 }
 
 - (id)initWithCanvas:(JSObjectRef)canvas renderingContext:(EJCanvasContextWebGL *)renderingContextp;
@@ -49,5 +55,10 @@ typedef struct {
 - (void)deleteTexture:(GLuint)texture;
 - (void)deleteProgram:(GLuint)program;
 - (void)deleteShader:(GLuint)shader;
+
+- (void)addVertexArray:(GLuint)vertexArray obj:(JSObjectRef)objp;
+- (void)deleteVertexArray:(GLuint)vertexArray;
+
+@property (readonly, nonatomic) EJCanvasContextWebGL *renderingContext;
 
 @end

@@ -1,66 +1,33 @@
 #import <QuartzCore/QuartzCore.h>
 #import <OpenGLES/EAGLDrawable.h>
 #import "EJTexture.h"
-#import "lodepng/lodepng.h"
 #import "EJConvertWebGL.h"
 
-#import "EJApp.h"
+#import "EJSharedTextureCache.h"
 
 
-@implementation EJTextureStorage
-@synthesize textureId;
-@synthesize immutable;
+#define PVR_TEXTURE_FLAG_TYPE_MASK 0xff
 
-- (id)init {
-	if( self = [super init] ) {
-		glGenTextures(1, &textureId);
-		immutable = NO;
-	}
-	return self;
-}
+enum {
+	kPVRTextureFlagTypePVRTC_2 = 24,
+	kPVRTextureFlagTypePVRTC_4
+};
 
-- (id)initImmutable {
-	if( self = [super init] ) {
-		glGenTextures(1, &textureId);
-		immutable = YES;
-	}
-	return self;
-}
-
-- (void)dealloc {
-	if( textureId ) {
-		glDeleteTextures(1, &textureId);
-	}
-	[super dealloc];
-}
-
-- (void)bindToTarget:(GLenum)target withParams:(EJTextureParam *)newParams {
-	glBindTexture(target, textureId);
-	
-	// Check if we have to set a param
-	if(params[kEJTextureParamMinFilter] != newParams[kEJTextureParamMinFilter]) {
-		params[kEJTextureParamMinFilter] = newParams[kEJTextureParamMinFilter];
-		glTexParameteri(target, GL_TEXTURE_MIN_FILTER, params[kEJTextureParamMinFilter]);
-	}
-	if(params[kEJTextureParamMagFilter] != newParams[kEJTextureParamMagFilter]) {
-		params[kEJTextureParamMagFilter] = newParams[kEJTextureParamMagFilter];
-		glTexParameteri(target, GL_TEXTURE_MAG_FILTER, params[kEJTextureParamMagFilter]);
-	}
-	if(params[kEJTextureParamWrapS] != newParams[kEJTextureParamWrapS]) {
-		params[kEJTextureParamWrapS] = newParams[kEJTextureParamWrapS];
-		glTexParameteri(target, GL_TEXTURE_WRAP_S, params[kEJTextureParamWrapS]);
-	}
-	if(params[kEJTextureParamWrapT] != newParams[kEJTextureParamWrapT]) {
-		params[kEJTextureParamWrapT] = newParams[kEJTextureParamWrapT];
-		glTexParameteri(target, GL_TEXTURE_WRAP_T, params[kEJTextureParamWrapT]);
-	}
-}
-
-@end
-
-
-
-
+typedef struct {
+	uint32_t headerLength;
+	uint32_t height;
+	uint32_t width;
+	uint32_t numMipmaps;
+	uint32_t flags;
+	uint32_t dataLength;
+	uint32_t bpp;
+	uint32_t bitmaskRed;
+	uint32_t bitmaskGreen;
+	uint32_t bitmaskBlue;
+	uint32_t bitmaskAlpha;
+	uint32_t pvrTag;
+	uint32_t numSurfs;
+} PVRTextureHeader;
 
 @implementation EJTexture
 
@@ -91,61 +58,67 @@
 		fullPath = [path retain];
 		owningContext = kEJTextureOwningContextCanvas2D;
 		
-		NSMutableData * pixels = [self loadPixelsFromPath:path];
-		[self createWithPixels:pixels format:GL_RGBA];
+		NSMutableData *pixels = [self loadPixelsFromPath:path];
+		if( pixels ) {
+			[self createWithPixels:pixels format:GL_RGBA];
+		}
 	}
 
 	return self;
 }
 
-+ (id)cachedTextureWithPath:(NSString *)path callback:(void (^)(void))callback {
++ (id)cachedTextureWithPath:(NSString *)path loadOnQueue:(NSOperationQueue *)queue callback:(NSOperation *)callback {
 	// For loading on a background thread (non-blocking), but tries the cache first
 	
-	EJTexture * texture = [[EJApp instance].textureCache objectForKey:path];
+	EJTexture *texture = [EJSharedTextureCache instance].textures[path];
 	if( texture ) {
 		// We already have a texture, but it may hasn't finished loading yet. If
 		// the texture's loadCallback is still present, add it as an dependency
 		// for the current callback.
 		
-		NSBlockOperation * callbackOp = [NSBlockOperation blockOperationWithBlock:callback];
 		if( texture->loadCallback ) {
-			[callbackOp addDependency:texture->loadCallback];
+			[callback addDependency:texture->loadCallback];
 		}
-		[[NSOperationQueue mainQueue] addOperation:callbackOp];
+		[NSOperationQueue.mainQueue addOperation:callback];
 	}
 	else {
 		// Create a new texture and add it to the cache
-		texture = [[EJTexture alloc] initWithPath:path callback:callback];
+		texture = [[EJTexture alloc] initWithPath:path loadOnQueue:queue callback:callback];
 		
-		[[EJApp instance].textureCache setObject:texture forKey:path];
+		[EJSharedTextureCache instance].textures[path] = texture;
 		[texture autorelease];
 		texture->cached = true;
 	}
 	return texture;
 }
 
-- (id)initWithPath:(NSString *)path callback:(void (^)(void))callback {
+- (id)initWithPath:(NSString *)path loadOnQueue:(NSOperationQueue *)queue callback:(NSOperation *)callback {
 	// For loading on a background thread (non-blocking)
 	if( self = [super init] ) {
 		contentScale = 1;
 		fullPath = [path retain];
 		owningContext = kEJTextureOwningContextCanvas2D;
 		
+		loadCallback = [[NSBlockOperation alloc] init];
+		
 		// Load the image file in a background thread
-		loadCallback = [[NSBlockOperation blockOperationWithBlock:callback] retain];
-		[[EJApp instance].opQueue addOperationWithBlock:^{
-			NSMutableData * pixels = [self loadPixelsFromPath:path];
+		[queue addOperationWithBlock:^{
+			NSMutableData *pixels = [self loadPixelsFromPath:path];
 			
 			// Upload the pixel data in the main thread, otherwise the GLContext gets confused.	
 			// We could use a sharegroup here, but it turned out quite buggy and has little
 			// benefits - the main bottleneck is loading the image file.
-			[[NSOperationQueue mainQueue] addOperation:[NSBlockOperation blockOperationWithBlock:^{
-				[self createWithPixels:pixels format:GL_RGBA];
-				[loadCallback start];
+			[loadCallback addExecutionBlock:^{
+				if( pixels ) {
+					[self createWithPixels:pixels format:GL_RGBA];
+				}
 				[loadCallback release];
-				loadCallback = NULL;
-			}]];
+				loadCallback = nil;
+			}];
+			[callback addDependency:loadCallback];
 			
+			[NSOperationQueue.mainQueue addOperation:loadCallback];
+			[NSOperationQueue.mainQueue addOperation:callback];
 		}];
 	}
 	return self;
@@ -194,8 +167,10 @@
 
 - (void)dealloc {
 	if( cached ) {
-		[[EJApp instance].textureCache removeObjectForKey:fullPath];
+		[[EJSharedTextureCache instance].textures removeObjectForKey:fullPath];
 	}
+	[loadCallback release];
+	
 	[fullPath release];
 	[textureStorage release];
 	[super dealloc];
@@ -204,12 +179,14 @@
 - (void)ensureMutableKeepPixels:(BOOL)keepPixels forTarget:(GLenum)target {
 
 	// If we have a TextureStorage but it's not mutable (i.e. created by Canvas2D) and
-	// we're not the only owner of it, we have to create a new TextureStorage
-	if( textureStorage && textureStorage.immutable && textureStorage.retainCount > 1 ) {
+	// we're not the only owner of it, we have to create a new TextureStorage.
+	// FIXME: If the texture is compressed, we simply ignore this check and use the compressed
+	// TextureStorage
+	if( textureStorage && textureStorage.immutable && textureStorage.retainCount > 1 && !isCompressed ) {
 	
 		// Keep pixel data of the old TextureStorage when creating the new?
 		if( keepPixels ) {
-			NSMutableData * pixels = self.pixels;
+			NSMutableData *pixels = self.pixels;
 			if( pixels ) {
 				[self createWithPixels:pixels format:GL_RGBA target:target];
 			}
@@ -234,7 +211,7 @@
 }
 
 - (id)copyWithZone:(NSZone *)zone {
-	EJTexture * copy = [[EJTexture allocWithZone:zone] init];
+	EJTexture *copy = [[EJTexture allocWithZone:zone] init];
 	
 	// This retains the textureStorage object and sets the associated properties
 	[copy createWithTexture:self];
@@ -243,8 +220,9 @@
 	// by createWithTexture
 	memcpy(copy->params, params, sizeof(EJTextureParams));
 	copy->owningContext = owningContext;
+	copy->isCompressed = isCompressed;
 	
-	if( self.isDynamic ) {
+	if( self.isDynamic && !isCompressed ) {
 		// We want a static copy. So if this texture is used by an FBO, we have to
 		// re-create the texture from pixels again
 		[copy createWithPixels:self.pixels format:format];
@@ -263,6 +241,7 @@
 	
 	width = other->width;
 	height = other->height;
+	isCompressed = other->isCompressed;
 	
 	textureStorage = [other->textureStorage retain];
 }
@@ -298,10 +277,62 @@
 		: GL_TEXTURE_BINDING_CUBE_MAP;
 	glGetIntegerv(bindingName, &boundTexture);
 	
+	if( isCompressed ) {
+		[self uploadCompressedPixels:pixels target:target];
+	}
+	else {
+		textureStorage = [[EJTextureStorage alloc] initImmutable];
+		[textureStorage bindToTarget:target withParams:params];
+		glTexImage2D(target, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, pixels.bytes);
+	}
+	
+	glBindTexture(target, boundTexture);
+}
+
+- (void)uploadCompressedPixels:(NSData *)pixels target:(GLenum)target {
+	PVRTextureHeader *header = (PVRTextureHeader *) pixels.bytes;
+	
+    uint32_t formatFlags = header->flags & PVR_TEXTURE_FLAG_TYPE_MASK;
+	
+	GLenum internalFormat;
+	uint32_t bpp;
+	
+	if( formatFlags == kPVRTextureFlagTypePVRTC_4 ) {
+		internalFormat = GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG;
+		bpp = 4;
+	}
+	else if( formatFlags == kPVRTextureFlagTypePVRTC_2 ) {
+		internalFormat = GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG;
+		bpp = 2;
+	}
+	
+	
+	// Create texture storage
+	if( header->numMipmaps > 0 ) {
+		params[kEJTextureParamMinFilter] = GL_LINEAR_MIPMAP_LINEAR;
+	}
+	
 	textureStorage = [[EJTextureStorage alloc] initImmutable];
 	[textureStorage bindToTarget:target withParams:params];
-	glTexImage2D(target, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, pixels.bytes);
-	glBindTexture(target, boundTexture);
+	
+	// Upload all mip levels
+	int mipWidth = width,
+		mipHeight = height;
+	
+	
+	uint8_t *bytes = ((uint8_t *)pixels.bytes) + header->headerLength;
+	
+	for( int mip = 0; mip < header->numMipmaps+1; mip++ ) {
+		uint32_t widthBlocks = MAX(mipWidth / (16/bpp), 2);
+		uint32_t heightBlocks = MAX(mipHeight / 4, 2);
+		uint32_t size = widthBlocks * heightBlocks * 8;
+		
+		glCompressedTexImage2D(GL_TEXTURE_2D, mip, internalFormat, mipWidth, mipHeight, 0, size, bytes);
+		bytes += size;
+
+		mipWidth = MAX(mipWidth >> 1, 1);
+		mipHeight = MAX(mipHeight >> 1, 1);
+	}
 }
 
 - (void)updateWithPixels:(NSData *)pixels atX:(int)sx y:(int)sy width:(int)sw height:(int)sh {	
@@ -325,7 +356,7 @@
 		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 		
 		int size = width * height * EJGetBytesPerPixel(GL_UNSIGNED_BYTE, format);
-		NSMutableData * data = [NSMutableData dataWithLength:size];
+		NSMutableData *data = [NSMutableData dataWithLength:size];
 		glReadPixels(0, 0, width, height, format, GL_UNSIGNED_BYTE, data.mutableBytes);
 		
 		glBindFramebuffer(GL_FRAMEBUFFER, boundFrameBuffer);
@@ -339,7 +370,7 @@
 - (NSMutableData *)loadPixelsFromPath:(NSString *)path {
 	// Try @2x texture?
 	if( [UIScreen mainScreen].scale == 2 ) {
-		NSString * path2x = [[[path stringByDeletingPathExtension]
+		NSString *path2x = [[[path stringByDeletingPathExtension]
 			stringByAppendingString:@"@2x"]
 			stringByAppendingPathExtension:[path pathExtension]];
 		
@@ -349,45 +380,43 @@
 		}
 	}
 	
-	// All CGImage functions return pixels with premultiplied alpha and there's no
-	// way to opt-out - thanks Apple, awesome idea.
-	// So, for PNG images we use the lodepng library instead.
 	
-	return [[path pathExtension] isEqualToString:@"png"]
-		? [self loadPixelsWithLodePNGFromPath:path]
-		: [self loadPixelsWithCGImageFromPath:path];
-}
-
-- (NSMutableData *)loadPixelsWithCGImageFromPath:(NSString *)path {	
-	UIImage * tmpImage = [[UIImage alloc] initWithContentsOfFile:path];
-	CGImageRef image = tmpImage.CGImage;
-	
-	width = CGImageGetWidth(image);
-	height = CGImageGetHeight(image);
-	
-	NSMutableData * pixels = [NSMutableData dataWithLength:width*height*4];
-	CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-	CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, colorSpace, kCGImageAlphaPremultipliedLast);
-	CGContextDrawImage(context, CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height), image);
-	CGContextRelease(context);
-	CGColorSpaceRelease(colorSpace);
-	[tmpImage release];
+	NSMutableData *pixels;
+	if( [path.pathExtension isEqualToString:@"pvr"] ) {
+		// Compressed PVRTC? Only load raw data bytes
+		pixels = [NSMutableData dataWithContentsOfFile:path];
+		if( !pixels ) {
+			NSLog(@"Error Loading image %@ - not found.", path);
+			return NULL;
+		}
+		PVRTextureHeader *header = (PVRTextureHeader *)pixels.bytes;
+		width = header->width;
+		height = header->height;
+		isCompressed = true;
+	}
+	else {
+		// Use UIImage for PNG, JPG and everything else
+		UIImage *tmpImage = [[UIImage alloc] initWithContentsOfFile:path];
+		if( !tmpImage ) {
+			NSLog(@"Error Loading image %@ - not found.", path);
+			return NULL;
+		}
+		
+		CGImageRef image = tmpImage.CGImage;
+		
+		width = CGImageGetWidth(image);
+		height = CGImageGetHeight(image);
+		
+		pixels = [NSMutableData dataWithLength:width*height*4];
+		CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+		CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, colorSpace, kCGImageAlphaPremultipliedLast);
+		CGContextDrawImage(context, CGRectMake(0.0, 0.0, (CGFloat)width, (CGFloat)height), image);
+		CGContextRelease(context);
+		CGColorSpaceRelease(colorSpace);
+		[tmpImage release];
+	}
 	
 	return pixels;
-}
-
-- (NSMutableData *)loadPixelsWithLodePNGFromPath:(NSString *)path {
-	unsigned int w, h;
-	unsigned char * pixels = NULL;
-	unsigned int error = lodepng_decode32_file(&pixels, &w, &h, [path UTF8String]);
-	
-	if( error ) {
-		NSLog(@"Error Loading image %@ - %u: %s", path, error, lodepng_error_text(error));
-	}
-	width = w;
-	height = h;
-	
-	return [NSMutableData dataWithBytesNoCopy:pixels length:w*h*4];
 }
 
 - (GLint)getParam:(GLenum)pname {
@@ -415,6 +444,117 @@
 	[textureStorage bindToTarget:target withParams:params];
 }
 
+- (UIImage *)image {
+	return [EJTexture imageWithPixels:self.pixels width:width height:height scale:contentScale];
+}
+
++ (UIImage *)imageWithPixels:(NSData *)pixels width:(int)width height:(int)height scale:(float)scale {
+	UIImage *newImage = nil;
+	
+	int nrOfColorComponents = 4; // RGBA
+	int bitsPerColorComponent = 8;
+	BOOL interpolateAndSmoothPixels = NO;
+	CGBitmapInfo bitmapInfo = kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast;
+	CGColorRenderingIntent renderingIntent = kCGRenderingIntentDefault;
+
+	CGDataProviderRef dataProviderRef;
+	CGColorSpaceRef colorSpaceRef;
+	CGImageRef imageRef;
+
+	@try {
+		dataProviderRef = CGDataProviderCreateWithData(NULL, pixels.bytes, pixels.length, nil);
+		colorSpaceRef = CGColorSpaceCreateDeviceRGB();
+		imageRef = CGImageCreate(
+			width, height,
+			bitsPerColorComponent, bitsPerColorComponent * nrOfColorComponents, width * nrOfColorComponents,
+			colorSpaceRef, bitmapInfo, dataProviderRef, NULL, interpolateAndSmoothPixels, renderingIntent
+		);
+		newImage = [[UIImage alloc] initWithCGImage:imageRef scale:scale orientation:UIImageOrientationUp];
+	}
+	@finally {
+		CGDataProviderRelease(dataProviderRef);
+		CGColorSpaceRelease(colorSpaceRef);
+		CGImageRelease(imageRef);
+	}
+
+	return newImage;
+}
+
++ (void)premultiplyPixels:(const GLubyte *)inPixels to:(GLubyte *)outPixels byteLength:(int)byteLength format:(GLenum)format {
+	const GLubyte *premultiplyTable = [EJSharedTextureCache instance].premultiplyTable.bytes;
+	
+	if( format == GL_RGBA ) {
+		for( int i = 0; i < byteLength; i += 4 ) {
+			unsigned short a = inPixels[i+3] * 256;
+			outPixels[i+0] = premultiplyTable[ a + inPixels[i+0] ];
+			outPixels[i+1] = premultiplyTable[ a + inPixels[i+1] ];
+			outPixels[i+2] = premultiplyTable[ a + inPixels[i+2] ];
+			outPixels[i+3] = inPixels[i+3];
+		}
+	}
+	else if ( format == GL_LUMINANCE_ALPHA ) {		
+		for( int i = 0; i < byteLength; i += 2 ) {
+			unsigned short a = inPixels[i+1] * 256;
+			outPixels[i+0] = premultiplyTable[ a + inPixels[i+0] ];
+			outPixels[i+1] = inPixels[i+1];
+		}
+	}
+}
+
++ (void)unPremultiplyPixels:(const GLubyte *)inPixels to:(GLubyte *)outPixels byteLength:(int)byteLength format:(GLenum)format {
+	const GLubyte *unPremultiplyTable = [EJSharedTextureCache instance].unPremultiplyTable.bytes;
+	
+	if( format == GL_RGBA ) {
+		for( int i = 0; i < byteLength; i += 4 ) {
+			unsigned short a = inPixels[i+3] * 256;
+			outPixels[i+0] = unPremultiplyTable[ a + inPixels[i+0] ];
+			outPixels[i+1] = unPremultiplyTable[ a + inPixels[i+1] ];
+			outPixels[i+2] = unPremultiplyTable[ a + inPixels[i+2] ];
+			outPixels[i+3] = inPixels[i+3];
+		}
+	}
+	else if ( format == GL_LUMINANCE_ALPHA ) {		
+		for( int i = 0; i < byteLength; i += 2 ) {
+			unsigned short a = inPixels[i+1] * 256;
+			outPixels[i+0] = unPremultiplyTable[ a + inPixels[i+0] ];
+			outPixels[i+1] = inPixels[i+1];
+		}
+	}
+}
+
++ (void)flipPixelsY:(GLubyte *)pixels bytesPerRow:(int)bytesPerRow rows:(int)rows {
+	if( !pixels ) { return; }
+	
+	GLuint middle = rows/2;
+	GLuint intsPerRow = bytesPerRow / sizeof(GLuint);
+	GLuint remainingBytes = bytesPerRow - intsPerRow * sizeof(GLuint);
+	
+	for( GLuint rowTop = 0, rowBottom = rows-1; rowTop < middle; rowTop++, rowBottom-- ) {
+		
+		// Swap bytes in packs of sizeof(GLuint) bytes
+		GLuint *iTop = (GLuint *)(pixels + rowTop * bytesPerRow);
+		GLuint *iBottom = (GLuint *)(pixels + rowBottom * bytesPerRow);
+		
+		GLuint itmp;
+		GLint n = intsPerRow;
+		do {
+			itmp = *iTop;
+			*iTop++ = *iBottom;
+			*iBottom++ = itmp;
+		} while(--n > 0);
+		
+		// Swap the remaining bytes
+		GLubyte *bTop = (GLubyte *)iTop;
+		GLubyte *bBottom = (GLubyte *)iBottom;
+		
+		GLubyte btmp;
+		switch( remainingBytes ) {
+			case 3: btmp = *bTop; *bTop++ = *bBottom; *bBottom++ = btmp;
+			case 2: btmp = *bTop; *bTop++ = *bBottom; *bBottom++ = btmp;
+			case 1: btmp = *bTop; *bTop = *bBottom; *bBottom = btmp;
+		}
+	}
+}
 
 
 @end
