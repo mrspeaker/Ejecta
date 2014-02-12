@@ -18,7 +18,7 @@
 	return self;
 }
 
-- (NSString*) deviceName {
+- (NSString*)deviceName {
 	struct utsname systemInfo;
 	uname( &systemInfo );
 	
@@ -200,7 +200,7 @@ EJ_BIND_GET(platform, ctx ) {
 }
 
 EJ_BIND_GET(language, ctx) {
-	return NSStringToJSValue( ctx, [[NSLocale preferredLanguages] objectAtIndex:0] );
+	return NSStringToJSValue( ctx, NSLocale.preferredLanguages[0] );
 }
 
 EJ_BIND_GET(appVersion, ctx ) {
@@ -241,6 +241,14 @@ EJ_BIND_GET(onLine, ctx) {
 	}
 	
 	return JSValueMakeBoolean(ctx, false);
+}
+
+EJ_BIND_GET(allowSleepMode, ctx) {
+	return JSValueMakeBoolean(ctx, ![UIApplication sharedApplication].idleTimerDisabled);
+}
+
+EJ_BIND_SET(allowSleepMode, ctx, value) {
+	[UIApplication sharedApplication].idleTimerDisabled = !JSValueToBoolean(ctx, value);
 }
 
 EJ_BIND_GET(otherAudioPlaying, ctx) {
